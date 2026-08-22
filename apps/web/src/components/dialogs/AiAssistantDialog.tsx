@@ -117,6 +117,7 @@ export const AiAssistantDialog = ({
   const instructionRef = useRef<HTMLTextAreaElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const attachmentReadIdRef = useRef(0);
+  const customInstructionEditedRef = useRef(false);
   const lastRequestRef = useRef<Parameters<typeof api.streamAiGeneration>[0] | null>(null);
   const assignPanelRef = useCallback((node: HTMLElement | null) => {
     panelRef.current = node;
@@ -168,12 +169,15 @@ export const AiAssistantDialog = ({
     setAttachmentError(null);
     setIsReadingAttachments(false);
     setInitializedForOpen(false);
+    customInstructionEditedRef.current = false;
     lastRequestRef.current = null;
   }, [defaultAction, defaultTargetLanguage, hasSelection, open]);
 
   useEffect(() => {
     if (!open || initializedForOpen || promptsQuery.isLoading) return;
-    if (customInstruction.trim()) {
+    if (customInstructionEditedRef.current || customInstruction.trim()) {
+      setSelectedPromptId(null);
+      setAction("custom");
       setInitializedForOpen(true);
       return;
     }
@@ -220,6 +224,7 @@ export const AiAssistantDialog = ({
   };
 
   const handleActionChange = (value: string) => {
+    customInstructionEditedRef.current = false;
     if (value === FREEFORM_VALUE) {
       setAction("custom");
       setSelectedPromptId(null);
@@ -270,18 +275,27 @@ export const AiAssistantDialog = ({
     }
   };
 
-  const generate = () => runGeneration(buildAiAssistantRequest({
-    action: effectiveActionKey,
-    contentMarkdown: sourceMarkdown,
-    customInstruction,
-    locale: i18n.resolvedLanguage,
-    parameterKind: selectedPrompt ? effectiveParameterKind : undefined,
-    promptId: selectedPrompt?.id,
-    targetLanguage,
-    title,
-    tone,
-    attachments: attachments.map(({ byteLength: _byteLength, ...attachment }) => attachment),
-  }));
+  const generate = () => {
+    const currentInstruction = instructionRef.current?.value ?? customInstruction;
+    if (!selectedPrompt && effectiveActionKey === "custom" && !currentInstruction.trim()) {
+      setError(t("aiAssistant.customInstructionRequired"));
+      instructionRef.current?.focus();
+      return;
+    }
+
+    return runGeneration(buildAiAssistantRequest({
+      action: effectiveActionKey,
+      contentMarkdown: sourceMarkdown,
+      customInstruction: currentInstruction,
+      locale: i18n.resolvedLanguage,
+      parameterKind: selectedPrompt ? effectiveParameterKind : undefined,
+      promptId: selectedPrompt?.id,
+      targetLanguage,
+      title,
+      tone,
+      attachments: attachments.map(({ byteLength: _byteLength, ...attachment }) => attachment),
+    }));
+  };
 
   const addAttachments = async (files: File[]) => {
     if (!files.length) return;
@@ -366,11 +380,7 @@ export const AiAssistantDialog = ({
   const isFreeformCustom = !selectedPromptId && action === "custom";
   const canSaveAsPrompt = isFreeformCustom && customInstruction.trim().length > 0;
   const generateDisabled = isGenerating
-    || isReadingAttachments
-    || (isFreeformCustom && !customInstruction.trim())
-    || (!isFreeformCustom && !selectedPromptId)
-    || (promptNeedsTargetLanguage(effectiveParameterKind) && !targetLanguage)
-    || (promptNeedsTone(effectiveParameterKind) && !tone);
+    || isReadingAttachments;
 
   const panelStyle = useMemo<CSSProperties>(() => {
     const viewportWidth = typeof window === "undefined" ? 1024 : window.innerWidth;
@@ -391,7 +401,7 @@ export const AiAssistantDialog = ({
         <section
           ref={assignPanelRef}
           aria-label={t("aiAssistant.title")}
-          className="fixed z-[70] max-h-[70dvh] w-[min(36rem,calc(100vw-1.5rem))] overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 shadow-2xl ring-1 ring-slate-950/5"
+          className="fixed z-[70] flex max-h-[70dvh] w-[min(36rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-2xl ring-1 ring-slate-950/5"
           role="dialog"
           style={panelStyle}
           onKeyDown={(event) => {
@@ -402,7 +412,7 @@ export const AiAssistantDialog = ({
             }
           }}
         >
-          <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="mb-3 flex shrink-0 items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
               <Sparkles className="h-5 w-5 shrink-0 text-emerald-600" />
               <span className="truncate text-sm font-semibold text-slate-950">{t("aiAssistant.title")}</span>
@@ -414,7 +424,8 @@ export const AiAssistantDialog = ({
               <X className="h-4 w-4" />
             </Button>
           </div>
-          <div className="grid gap-4">
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <div className="grid gap-4">
             {hasSelection ? (
               <p className="max-h-12 overflow-hidden whitespace-pre-wrap border-l-2 border-emerald-200 pl-3 text-xs leading-5 text-slate-500">
                 {selectionMarkdown}
@@ -464,7 +475,7 @@ export const AiAssistantDialog = ({
                     </SelectGroup>
                   </SelectContent>
                 </Select>
-                <div className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-[auto_auto]">
+                <div className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-[8rem_7rem]">
                   <Button
                     type="button"
                     variant={!selectedPromptId && action === "custom" ? "solid" : "outline"}
@@ -480,7 +491,11 @@ export const AiAssistantDialog = ({
                     </Button>
                   ) : (
                     <Button type="button" variant="solid" className="h-10 min-w-0 w-full gap-1.5 whitespace-nowrap px-3 text-sm font-semibold" disabled={generateDisabled} onClick={() => void generate()}>
-                      <Sparkles className="h-4 w-4 shrink-0" />{t("aiAssistant.generate")}
+                      <Sparkles className="h-4 w-4 shrink-0" />
+                      {t("aiAssistant.generate")}
+                      <kbd aria-hidden="true" className="ml-0.5 rounded bg-white/10 px-1 py-0.5 text-[10px] font-medium leading-none text-white/65">
+                        ↵
+                      </kbd>
                     </Button>
                   )}
                 </div>
@@ -538,12 +553,31 @@ export const AiAssistantDialog = ({
                   className="min-h-24 resize-y rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/15"
                   value={customInstruction}
                   onChange={(event) => {
-                    if (selectedPromptId) {
-                      setSelectedPromptId(null);
-                      setAction("custom");
-                    }
+                    customInstructionEditedRef.current = true;
+                    setSelectedPromptId(null);
+                    setAction("custom");
                     setCustomInstruction(event.target.value);
                     clearResult();
+                  }}
+                  onCompositionEnd={(event) => {
+                    customInstructionEditedRef.current = true;
+                    setSelectedPromptId(null);
+                    setAction("custom");
+                    setCustomInstruction(event.currentTarget.value);
+                    clearResult();
+                  }}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key !== "Enter"
+                      || event.shiftKey
+                      || event.nativeEvent.isComposing
+                      || isGenerating
+                      || isReadingAttachments
+                    ) {
+                      return;
+                    }
+                    event.preventDefault();
+                    void generate();
                   }}
                   placeholder={t("aiAssistant.customInstructionPlaceholder")}
                   maxLength={2_000}
@@ -655,9 +689,10 @@ export const AiAssistantDialog = ({
                 </div>
               </div>
             ) : null}
+            </div>
           </div>
           {output ? (
-            <div className="mt-4 flex flex-wrap justify-between gap-2">
+            <div className="mt-3 flex shrink-0 flex-wrap justify-between gap-2 border-t border-slate-200 pt-3" data-ai-assistant-actions>
               <div className="flex flex-wrap gap-2">
                 <Button type="button" variant="outline" disabled={isGenerating} onClick={() => void copy()}>{copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}{t(copied ? "aiAssistant.copied" : "aiAssistant.copy")}</Button>
                 <Button type="button" variant="outline" disabled={isGenerating} onClick={() => { setOutput(""); setError(null); }}><Trash2 className="h-4 w-4" />{t("aiAssistant.discard")}</Button>

@@ -23,8 +23,15 @@ const ensureAuthenticatedPage = async (page: Page) => {
   await expect(page.getByRole("button", { name: "个人中心", exact: true })).toBeVisible({ timeout: 20_000 });
 };
 
-const mockAiGeneration = async (page: Page, replacement: string) => {
+const mockAiGeneration = async (
+  page: Page,
+  replacement: string,
+  onRequest?: (body: Record<string, unknown>) => void,
+  delayMs = 0,
+) => {
   await page.route("**/api/v1/ai/generate", async (route) => {
+    onRequest?.(route.request().postDataJSON() as Record<string, unknown>);
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
     await route.fulfill({
       status: 200,
       contentType: "text/event-stream; charset=utf-8",
@@ -177,7 +184,21 @@ test.describe("AI custom prompts", () => {
     const assistant = page.getByRole("dialog", { name: "AI 笔记助手" });
     await expect(assistant).toBeVisible();
     const customInstructionButton = assistant.getByRole("button", { name: "自定义指令", exact: true });
+    const actionSelect = assistant.getByRole("combobox", { name: "处理方式" });
+    const generateButton = assistant.getByRole("button", { name: "生成", exact: true });
     await expect(customInstructionButton).toBeVisible();
+    const [actionSelectBox, customInstructionBox, generateBox] = await Promise.all([
+      actionSelect.boundingBox(),
+      customInstructionButton.boundingBox(),
+      generateButton.boundingBox(),
+    ]);
+    expect(actionSelectBox).not.toBeNull();
+    expect(customInstructionBox).not.toBeNull();
+    expect(generateBox).not.toBeNull();
+    expect(customInstructionBox!.width).toBeGreaterThanOrEqual(120);
+    expect(generateBox!.width).toBeGreaterThanOrEqual(104);
+    expect(actionSelectBox!.width / customInstructionBox!.width).toBeLessThan(2.5);
+    expect(customInstructionBox!.width / generateBox!.width).toBeLessThan(1.25);
     const customInstructionLineCount = await customInstructionButton.evaluate((element) => {
       const textNode = Array.from(element.childNodes)
         .find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
@@ -316,6 +337,56 @@ test.describe("AI custom prompts", () => {
     });
   });
 
+  test("keeps a Chinese custom instruction usable while prompts initialize", async ({ page }) => {
+    const memo = await createMemo(page, `e2e-ai-ime-${Date.now()}`, "中文输入状态测试");
+    let submittedBody: Record<string, unknown> | null = null;
+    let generationRequestCount = 0;
+    await page.route("**/api/v1/ai/prompts*", async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      await route.continue();
+    });
+    await mockAiGeneration(page, "宋词结果", (body) => {
+      generationRequestCount += 1;
+      submittedBody = body;
+    }, 300);
+    await ensureAuthenticatedPage(page);
+    await page.getByRole("button", { name: new RegExp(notebookName) }).click();
+    await page.locator(`[data-memo-id="${memo.id}"]`).locator("button").first().click();
+    await page.getByRole("button", { name: "打开 AI 写作助手", exact: true }).click();
+
+    const dialog = page.getByRole("dialog", { name: "AI 笔记助手" });
+    const textarea = dialog.locator("textarea");
+    await textarea.fill("写个宋词");
+    const generateButton = dialog.getByRole("button", { name: "生成", exact: true });
+    await expect(generateButton).toBeEnabled();
+    await expect(generateButton.locator("kbd")).toHaveText("↵");
+
+    await textarea.press("Shift+Enter");
+    await textarea.pressSequentially("不要参考原笔记");
+    await expect(textarea).toHaveValue("写个宋词\n不要参考原笔记");
+
+    await textarea.evaluate((element) => {
+      element.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        isComposing: true,
+        key: "Enter",
+      }));
+    });
+    expect(submittedBody).toBeNull();
+
+    await textarea.press("Enter");
+    await expect.poll(() => generationRequestCount).toBe(1);
+    await textarea.press("Enter");
+    await page.waitForTimeout(50);
+    expect(generationRequestCount).toBe(1);
+
+    await expect(dialog.getByText("宋词结果", { exact: true })).toBeVisible();
+    expect(submittedBody).toMatchObject({
+      action: "custom",
+      instruction: "写个宋词\n不要参考原笔记",
+    });
+  });
+
   test("creates prompts in settings and lists them in the assistant action menu", async ({ page, request }) => {
     const promptName = `e2e-设置指令-${Date.now()}`;
     const instruction = "把笔记提炼成三条要点，使用 Markdown 列表。";
@@ -375,6 +446,7 @@ test.describe("AI custom prompts", () => {
   });
 
   test("inserts generated content at the caret captured when AI opens", async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 720 });
     const memo = await createMemo(
       page,
       `e2e-ai-caret-insert-${Date.now()}`,
@@ -394,7 +466,23 @@ test.describe("AI custom prompts", () => {
     const dialog = page.getByRole("dialog", { name: "AI 笔记助手" });
     await dialog.getByRole("button", { name: "生成", exact: true }).click();
     await expect(dialog.getByText("AI 插入段落", { exact: true })).toBeVisible();
-    await dialog.getByRole("button", { name: "追加到笔记", exact: true }).click();
+    const copyButton = dialog.getByRole("button", { name: "复制结果", exact: true });
+    const appendButton = dialog.getByRole("button", { name: "追加到笔记", exact: true });
+    await expect(copyButton).toBeVisible();
+    await expect(appendButton).toBeVisible();
+    const [dialogBox, copyButtonBox, appendButtonBox] = await Promise.all([
+      dialog.boundingBox(),
+      copyButton.boundingBox(),
+      appendButton.boundingBox(),
+    ]);
+    expect(dialogBox).not.toBeNull();
+    expect(copyButtonBox).not.toBeNull();
+    expect(appendButtonBox).not.toBeNull();
+    expect(copyButtonBox!.y).toBeGreaterThanOrEqual(dialogBox!.y);
+    expect(copyButtonBox!.y + copyButtonBox!.height).toBeLessThanOrEqual(dialogBox!.y + dialogBox!.height);
+    expect(appendButtonBox!.y).toBeGreaterThanOrEqual(dialogBox!.y);
+    expect(appendButtonBox!.y + appendButtonBox!.height).toBeLessThanOrEqual(dialogBox!.y + dialogBox!.height);
+    await appendButton.click();
     await expect(dialog).toBeHidden();
     await expect.poll(() => editor.locator(":scope > p").allTextContents()).toEqual([
       "第一段",
